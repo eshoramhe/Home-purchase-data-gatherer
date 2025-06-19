@@ -6,6 +6,46 @@ import re
 from datetime import datetime
 import pandas as pd # Import pandas for tabular data
 
+# Firebase imports
+from firebase_admin import initialize_app, credentials
+from firebase_admin import firestore
+from firebase_admin import auth
+
+# --- Initialize Firebase (MANDATORY for persistence) ---
+# Global variables from Canvas environment
+app_id = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'
+firebase_config = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}')
+initial_auth_token = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : None
+
+# Initialize Firebase app only once
+if not st.session_state.get('firebase_initialized', False):
+    try:
+        # Check if Firebase has already been initialized to avoid error
+        # This is a common pattern in Streamlit to handle reruns
+        if not firestore._apps: # Check if there are any initialized apps
+            cred = credentials.Certificate(firebase_config)
+            initialize_app(cred, name=app_id) # Use app_id as name to avoid re-initialization conflicts
+        
+        db = firestore.client(app=firestore.get_app(name=app_id))
+        st.session_state.db = db # Store db client in session state
+
+        # Authenticate user
+        if initial_auth_token:
+            user = auth.verify_id_token(initial_auth_token)
+            st.session_state.user_id = user['uid']
+        else:
+            # For anonymous sign-in if no auth token (e.g., local development)
+            # In a real deployed Canvas, __initial_auth_token should be present
+            st.session_state.user_id = "anonymous_user" # A fallback ID for local testing
+
+        st.session_state.firebase_initialized = True
+        st.session_state.auth_ready = True # Indicate authentication is ready
+    except Exception as e:
+        st.error(f"Error initializing Firebase: {e}")
+        st.session_state.firebase_initialized = False
+        st.session_state.auth_ready = False
+
+
 # --- Web Page Reader App Title and Description ---
 st.set_page_config(
     page_title="Web Page Data Extractor",
@@ -19,7 +59,7 @@ st.write(
     """
     Enter a URL of a real estate listing below. The app will attempt to extract
     key information such as address, cost, square footage, number of bedrooms,
-    and publication date, then allow you to download it.
+    and publication date. All gathered data will be saved to your personal data store.
     """
 )
 
@@ -33,7 +73,8 @@ def extract_real_estate_data(soup, url_input): # Pass url_input to the function
         "Plot Square Footage": None,
         "Number of Bedrooms": None,
         "Publication Date": None,
-        "Extracted URL": url_input # Store the URL for which data was extracted
+        "Extracted URL": url_input, # Store the URL for which data was extracted
+        "Extraction Timestamp": datetime.now().isoformat() # Add a timestamp
     }
 
     # --- Address ---
@@ -162,6 +203,18 @@ url_input = st.text_input(
     key="url_input"
 )
 
+# --- Check Firebase and Auth status ---
+if not st.session_state.get('auth_ready', False):
+    st.info("Initializing application services... Please wait.")
+    st.stop() # Halt execution until Firebase is ready
+
+db = st.session_state.db
+user_id = st.session_state.user_id
+
+# Display the user ID for debugging/identification (Mandatory for multi-user apps)
+st.write(f"Logged in as User ID: `{user_id}`")
+
+
 # --- Read Web Page Button ---
 if st.button("Extract Real Estate Data", use_container_width=True, type="primary"):
     if not url_input:
@@ -182,26 +235,19 @@ if st.button("Extract Real Estate Data", use_container_width=True, type="primary
                 # Extract data, passing url_input to the function
                 extracted_data = extract_real_estate_data(soup, url_input)
                 
-                # Convert the extracted dictionary to a DataFrame for tabular display
-                # Create a list of dictionaries, one for each row (in this case, just one row of data)
-                df = pd.DataFrame([extracted_data])
-
                 # Check if any non-URL data was extracted
-                if any(value is not None for key, value in extracted_data.items() if key != "Extracted URL"):
-                    st.subheader("Extracted Data:")
-                    # Display the DataFrame as a table
-                    st.dataframe(df)
+                if any(value is not None for key, value in extracted_data.items() if key not in ["Extracted URL", "Extraction Timestamp"]):
+                    st.subheader("Newly Extracted Data:")
+                    st.json(extracted_data) # Show the newly extracted data
 
-                    # Provide download button for CSV
-                    csv_output = df.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label="Download Data as CSV",
-                        data=csv_output,
-                        # Set the file_name to "home_data.csv"
-                        # The user's browser will handle saving this file to their chosen local directory.
-                        file_name="home_data.csv",
-                        mime="text/csv"
-                    )
+                    # Save to Firestore
+                    try:
+                        # Collection path for private user data
+                        collection_ref = db.collection(f'artifacts/{app_id}/users/{user_id}/home_data')
+                        collection_ref.add(extracted_data)
+                        st.success("Data successfully saved to your personal storage!")
+                    except Exception as e:
+                        st.error(f"Failed to save data to Firestore: {e}")
                 else:
                     st.warning("Could not extract specific real estate data from this page. "
                                "The page structure might be different or the data is not present.")
@@ -221,4 +267,39 @@ if st.button("Extract Real Estate Data", use_container_width=True, type="primary
                 st.error(f"An unexpected error occurred: {e}")
 
 st.markdown("---")
-st.info("Developed with Streamlit for reading and extracting web page data.")
+st.header("All Saved Home Data")
+
+# --- Fetch and Display All Saved Data from Firestore ---
+if st.session_state.get('auth_ready', False):
+    try:
+        # Fetch all documents from the user's home_data collection
+        collection_ref = db.collection(f'artifacts/{app_id}/users/{user_id}/home_data')
+        docs = collection_ref.stream() # Get all documents
+
+        all_home_data = []
+        for doc in docs:
+            doc_data = doc.to_dict()
+            all_home_data.append(doc_data)
+
+        if all_home_data:
+            df_all = pd.DataFrame(all_home_data)
+            st.dataframe(df_all)
+
+            # Provide download button for ALL data as CSV
+            csv_output_all = df_all.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="Download All Saved Data as CSV",
+                data=csv_output_all,
+                file_name="all_home_data.csv", # Changed filename to reflect all data
+                mime="text/csv"
+            )
+        else:
+            st.info("No home data saved yet. Enter a URL and extract some data!")
+    except Exception as e:
+        st.error(f"Error fetching saved data: {e}")
+else:
+    st.info("Waiting for Firebase to initialize before loading saved data.")
+
+
+st.markdown("---")
+st.info("Developed with Streamlit and Firebase for persistent data storage.")
