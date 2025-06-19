@@ -13,9 +13,13 @@ from firebase_admin import auth
 
 # --- Initialize Firebase (MANDATORY for persistence) ---
 # Global variables from Canvas environment
-app_id = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'
-firebase_config = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}')
-initial_auth_token = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : None
+# Check if __app_id is defined and not None, otherwise use 'default-app-id'
+app_id = typeof __app_id !== 'undefined' && __app_id is not None ? __app_id : 'default-app-id'
+# Check if __firebase_config is defined and not None, otherwise use empty dict
+firebase_config = JSON.parse(typeof __firebase_config !== 'undefined' && __firebase_config is not None ? __firebase_config : '{}')
+# Check if __initial_auth_token is defined and not None, otherwise use None
+initial_auth_token = typeof __initial_auth_token !== 'undefined' && __initial_auth_token is not None ? __initial_auth_token : None
+
 
 # Initialize Firebase app only once
 if not st.session_state.get('firebase_initialized', False):
@@ -23,21 +27,25 @@ if not st.session_state.get('firebase_initialized', False):
         # Check if Firebase has already been initialized to avoid error
         # This is a common pattern in Streamlit to handle reruns
         if not firestore._apps: # Check if there are any initialized apps
+            # Initialize with credentials and a name derived from app_id
             cred = credentials.Certificate(firebase_config)
-            initialize_app(cred, name=app_id) # Use app_id as name to avoid re-initialization conflicts
+            initialize_app(cred, name=app_id)
         
+        # Get the Firestore client for the specific app
         db = firestore.client(app=firestore.get_app(name=app_id))
         st.session_state.db = db # Store db client in session state
 
         # Authenticate user
         if initial_auth_token:
+            # Use the provided custom auth token for Canvas environment
             user = auth.verify_id_token(initial_auth_token)
             st.session_state.user_id = user['uid']
         else:
-            # For anonymous sign-in if no auth token (e.g., local development)
-            # In a real deployed Canvas, __initial_auth_token should be present
-            st.session_state.user_id = "anonymous_user" # A fallback ID for local testing
-
+            # Fallback for anonymous sign-in if no auth token (e.g., local development outside Canvas)
+            # In a real deployed Canvas, __initial_auth_token should always be present
+            # Generate a random UUID for anonymous users for unique session identification
+            st.session_state.user_id = "anonymous_" + str(uuid.uuid4()) # Added uuid import
+            
         st.session_state.firebase_initialized = True
         st.session_state.auth_ready = True # Indicate authentication is ready
     except Exception as e:
@@ -238,7 +246,10 @@ if st.button("Extract Real Estate Data", use_container_width=True, type="primary
                 # Check if any non-URL data was extracted
                 if any(value is not None for key, value in extracted_data.items() if key not in ["Extracted URL", "Extraction Timestamp"]):
                     st.subheader("Newly Extracted Data:")
-                    st.json(extracted_data) # Show the newly extracted data
+                    # Convert the extracted dictionary to a DataFrame for tabular display
+                    # Create a list containing the single dictionary
+                    df_new = pd.DataFrame([extracted_data]) 
+                    st.dataframe(df_new) # Display the newly extracted data as a table
 
                     # Save to Firestore
                     try:
