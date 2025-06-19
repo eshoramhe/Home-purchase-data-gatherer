@@ -197,7 +197,9 @@ if st.button("Extract Real Estate Data", use_container_width=True, type="primary
                     st.download_button(
                         label="Download Data as CSV",
                         data=csv_output,
-                        file_name="real_estate_data.csv",
+                        # Set the file_name to "home_data.csv"
+                        # The user's browser will handle saving this file to their chosen local directory.
+                        file_name="home_data.csv",
                         mime="text/csv"
                     )
                 else:
